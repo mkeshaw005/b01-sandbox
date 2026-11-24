@@ -1,0 +1,132 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "platform/catalog/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      slugs: ${{ steps.affected.outputs.slugs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: affected
+        name: Find enrolled apps changed by this push
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            changed="$(git diff --name-only "$BEFORE" "$AFTER")"
+          else
+            changed="$(git ls-tree -r --name-only "$AFTER")"
+          fi
+          CHANGED="$changed" python3 -I - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, pathlib, re
+          slugs = set()
+          for name in os.environ["CHANGED"].splitlines():
+              match = re.fullmatch(r"apps/([a-z0-9][a-z0-9-]{1,28}[a-z0-9])/.+", name) or \
+                  re.fullmatch(r"platform/catalog/([a-z0-9][a-z0-9-]{1,28}[a-z0-9])\.json", name)
+              if match:
+                  slugs.add(match.group(1))
+          enrolled = []
+          for slug in sorted(slugs):
+              catalog = pathlib.Path("platform/catalog") / f"{slug}.json"
+              if catalog.is_file() and pathlib.Path("apps", slug).is_dir() \
+                      and json.loads(catalog.read_text()).get("slug") == slug:
+                  enrolled.append(slug)
+          print("slugs=" + json.dumps(enrolled))
+          PY
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.slugs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        slug: ${{ fromJSON(needs.plan.outputs.slugs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Build the package without running app code
+        env:
+          SLUG: ${{ matrix.slug }}
+        run: |
+          mkdir -p out package
+          cp -R "apps/$SLUG/." package/
+          rm -rf package/vendor package/tests
+          python -m pip install --require-hashes --only-binary=:all: --no-compile \
+            --target package/vendor -r "apps/$SLUG/requirements.txt"
+          (cd package && zip -q -r -X ../out/package.zip .)
+          (cd out && sha256sum package.zip > package.zip.sha256)
+          cat out/package.zip.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-${{ matrix.slug }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [plan, build]
+    if: needs.plan.outputs.slugs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        slug: ${{ fromJSON(needs.plan.outputs.slugs) }}
+    environment: dashboard-${{ matrix.slug }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-${{ matrix.slug }}
+          path: out
+      - name: Verify the package digest
+        working-directory: out
+        run: sha256sum --check package.zip.sha256
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy the verified package
+        env:
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
+        run: |
+          az webapp deploy --resource-group "$RESOURCE_GROUP" --name "$WEBAPP_NAME" \
+            --src-path out/package.zip --type zip --clean true --restart true --output none
+      - name: Confirm anonymous access is blocked
+        env:
+          WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
+          RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: |
+          host="$(az webapp show --resource-group "$RESOURCE_GROUP" --name "$WEBAPP_NAME" --query defaultHostName -o tsv)"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "https://$host/")"
+          echo "Anonymous response: $code"
+          [ "$code" = "401" ] || [ "$code" = "302" ]
