@@ -1,0 +1,26 @@
+name: validate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check changed file names without running PR code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')"
+          if printf '%s\n' "$files" | grep -Eq '(^|/)FAIL_CHECK$'; then
+            echo "FAIL_CHECK is present, so this required check fails by design."
+            exit 1
+          fi
+          echo "Validation passed."
