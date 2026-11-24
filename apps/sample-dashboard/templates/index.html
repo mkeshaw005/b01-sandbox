@@ -1,3 +1,24 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Orders</title></head>
-<body><h1>Weekly orders by region</h1><p>{{ orders }} orders</p></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sample Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; padding: 0 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid #ccc; padding: .5rem; text-align: left; }
+    td:last-child, th:last-child { text-align: right; }
+  </style>
+</head>
+<body>
+  <h1>Sample Dashboard</h1>
+  <p>{{ total }} fake orders</p>
+  <table>
+    <thead><tr><th>Region</th><th>Orders</th></tr></thead>
+    <tbody>
+      {% for row in rows %}<tr><td>{{ row.region }}</td><td>{{ row.orders }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>
